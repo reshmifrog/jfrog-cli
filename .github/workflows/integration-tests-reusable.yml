@@ -1,0 +1,186 @@
+# ============================================================================
+# Reusable Integration Tests Workflow
+# ============================================================================
+# 
+# This workflow can be called by other repositories (like jfrog-cli-artifactory)
+# to run integration tests with custom replace directives.
+#
+# Usage from another repo:
+#   jobs:
+#     test:
+#       uses: jfrog/jfrog-cli/.github/workflows/integration-tests-reusable.yml@main
+#       with:
+#         test_suite: artifactory
+#         artifactory_replace: "reshmifrog/jfrog-cli-artifactory v0.0.0-20260119-abc123"
+#       secrets: inherit
+#
+# ============================================================================
+
+name: Integration Tests (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      test_suite:
+        description: 'Test suite to run (artifactory, npm, maven, gradle, go, conan, helm, nuget, pip, docker)'
+        required: false
+        default: 'artifactory'
+        type: string
+      artifactory_replace:
+        description: 'Replace for jfrog-cli-artifactory (e.g., reshmifrog/jfrog-cli-artifactory v0.0.0-...)'
+        required: true
+        type: string
+      build_info_replace:
+        description: 'Replace for build-info-go (optional)'
+        required: false
+        type: string
+      client_go_replace:
+        description: 'Replace for jfrog-client-go (optional)'
+        required: false
+        type: string
+      cli_core_replace:
+        description: 'Replace for jfrog-cli-core (optional)'
+        required: false
+        type: string
+
+jobs:
+  Integration-Tests:
+    name: ${{ inputs.test_suite }} Tests
+    runs-on: ubuntu-24.04
+    env:
+      JFROG_CLI_LOG_LEVEL: DEBUG
+      GOPROXY: direct
+    steps:
+      - name: Checkout jfrog-cli
+        uses: actions/checkout@v5
+
+      - name: Setup Go with cache
+        uses: jfrog/.github/actions/install-go-with-cache@main
+
+      # Setup tools based on test suite
+      - name: Install npm
+        if: inputs.test_suite == 'npm'
+        uses: actions/setup-node@v5
+        with:
+          node-version: "16"
+
+      - name: Setup Python3
+        if: inputs.test_suite == 'pip' || inputs.test_suite == 'conan'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install pipenv & poetry
+        if: inputs.test_suite == 'pip'
+        run: python -m pip install pipenv poetry
+
+      - name: Install Conan
+        if: inputs.test_suite == 'conan'
+        uses: turtlebrowser/get-conan@main
+        with:
+          version: '2.10.2'
+
+      - name: Install Helm
+        if: inputs.test_suite == 'helm'
+        uses: azure/setup-helm@v4
+        with:
+          version: 'latest'
+
+      - name: Install NuGet 6.x
+        if: inputs.test_suite == 'nuget'
+        uses: nuget/setup-nuget@v2
+        with:
+          nuget-version: 6.x
+
+      - name: Install dotnet 8.x
+        if: inputs.test_suite == 'nuget'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: Install Mono on Ubuntu (for NuGet)
+        if: inputs.test_suite == 'nuget'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-transport-https dirmngr gnupg ca-certificates
+          sudo apt-key adv --recv-keys --keyserver hkp://keyserver.ubuntu.com:80 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
+          echo "deb https://download.mono-project.com/repo/ubuntu stable-focal main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
+          sudo apt-get update
+          sudo apt-get install -y mono-complete
+
+      - name: Setup Java (for Maven/Gradle)
+        if: inputs.test_suite == 'maven' || inputs.test_suite == 'gradle'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'corretto'
+          java-version: '17'
+
+      # Add replace directives from inputs
+      - name: Add replace directives
+        run: |
+          echo "============================================"
+          echo "Adding replace directives from inputs..."
+          echo "============================================"
+          
+          # Remove any existing replace directives
+          sed -i '/^replace github.com\/jfrog\/jfrog-cli-artifactory/d' go.mod
+          sed -i '/^replace github.com\/jfrog\/build-info-go/d' go.mod
+          sed -i '/^replace github.com\/jfrog\/jfrog-client-go/d' go.mod
+          sed -i '/^replace github.com\/jfrog\/jfrog-cli-core/d' go.mod
+          
+          echo "" >> go.mod
+          echo "// Replace directives from workflow_call inputs" >> go.mod
+          
+          # Always add artifactory replace (required input)
+          echo "replace github.com/jfrog/jfrog-cli-artifactory => github.com/${{ inputs.artifactory_replace }}" >> go.mod
+          echo "✅ Added: jfrog-cli-artifactory => ${{ inputs.artifactory_replace }}"
+          
+          # Add build-info-go if provided
+          if [ -n "${{ inputs.build_info_replace }}" ]; then
+            echo "replace github.com/jfrog/build-info-go => github.com/${{ inputs.build_info_replace }}" >> go.mod
+            echo "✅ Added: build-info-go => ${{ inputs.build_info_replace }}"
+          fi
+          
+          # Add client-go if provided
+          if [ -n "${{ inputs.client_go_replace }}" ]; then
+            echo "replace github.com/jfrog/jfrog-client-go => github.com/${{ inputs.client_go_replace }}" >> go.mod
+            echo "✅ Added: jfrog-client-go => ${{ inputs.client_go_replace }}"
+          fi
+          
+          # Add cli-core if provided
+          if [ -n "${{ inputs.cli_core_replace }}" ]; then
+            echo "replace github.com/jfrog/jfrog-cli-core/v2 => github.com/${{ inputs.cli_core_replace }}" >> go.mod
+            echo "✅ Added: jfrog-cli-core => ${{ inputs.cli_core_replace }}"
+          fi
+          
+          echo ""
+          echo "============================================"
+          echo "Final go.mod (last 10 lines):"
+          echo "============================================"
+          tail -10 go.mod
+          
+          echo ""
+          echo "Running go mod tidy..."
+          go mod tidy
+
+      # Install Artifactory using existing jfrog-cli infrastructure
+      - name: Install local Artifactory
+        uses: jfrog/.github/actions/install-local-artifactory@main
+        with:
+          RTLIC: ${{ secrets.RTLIC }}
+          RT_CONNECTION_TIMEOUT_SECONDS: '1200'
+
+      - name: Run Integration Tests
+        env:
+          YARN_IGNORE_NODE: 1
+        run: |
+          echo "============================================"
+          echo "Running ${{ inputs.test_suite }} integration tests"
+          echo "============================================"
+          
+          go test -v github.com/jfrog/jfrog-cli --timeout 0 \
+            --test.${{ inputs.test_suite }} \
+            --jfrog.url=http://127.0.0.1:8082 \
+            --jfrog.adminToken=${{ env.JFROG_TESTS_LOCAL_ACCESS_TOKEN }} \
+            --ci.runId=reusable-${{ inputs.test_suite }}
+
